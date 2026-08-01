@@ -177,6 +177,15 @@ export async function postChat(
 }
 
 /** Small enough to fold into /health later if it earns its place. */
-export function getChatBudget(_request: Request, response: Response): void {
-  response.status(200).json({ ok: true, data: { vision: visionBudget() } });
+export async function getChatBudget(
+  _request: Request,
+  response: Response,
+): Promise<void> {
+  // Awaited, obviously — but worth a note, because the un-awaited version
+  // typechecked cleanly and shipped: the payload is an untyped object literal,
+  // so a Promise is a perfectly valid thing to put in it, and JSON.stringify
+  // renders one as `{}`. The endpoint answered 200 with an empty budget.
+  response
+    .status(200)
+    .json({ ok: true, data: { vision: await visionBudget() } });
 }
