@@ -13,6 +13,58 @@ import type { CallRecord } from "./types.js";
 import { chat, LlmError, type ChatMessage } from "../llm/index.js";
 import type { JsonSchema, Provider } from "../llm/types.js";
 
+/**
+ * The index just past the object that opens at `start`, or -1 if it never
+ * closes.
+ *
+ * Brace counting has to know about strings, because a brace inside a string
+ * value is not structure — `{"q":"use {} here"}` closes at the last brace, not
+ * the first one that balances the count.
+ */
+function endOfObject(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < text.length; i += 1) {
+    const char = text[i];
+
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+
+    if (char === '"') inString = true;
+    else if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+
+  return -1;
+}
+
+/**
+ * The first complete JSON object in the model's reply, or null.
+ *
+ * The rule that matters is what this *refuses*. It used to slice from the
+ * first `{` to the last `}`, which meant a reply containing one good object
+ * followed by anything else parsed as the good object and the rest vanished.
+ * That is the worst possible behaviour for a degenerate model: a run that
+ * repeats itself, or stops mid-thought and starts again, looked from the
+ * outside exactly like a clean answer. The truncation was invisible, so
+ * nothing retried and nothing was logged.
+ *
+ * So: find the first object that actually balances, and reject when structure
+ * follows it. Trailing prose is still forgiven — "…and that's the JSON" is a
+ * model being chatty, not a model degenerating — but a second `{` means the
+ * reply is not one object, and the caller is told rather than shown the first
+ * one. Rejecting returns null, which is the existing signal for unreadable:
+ * jsonCall retries once and then throws UnreadableResponseError.
+ */
 export function extractJson<T>(raw: string): T | null {
   let text = raw.trim();
 
@@ -22,12 +74,21 @@ export function extractJson<T>(raw: string): T | null {
     .replace(/\r?\n?```$/i, "")
     .trim();
 
-  // Anything the model said around the object.
+  // Anything the model said before the object.
   const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end === -1 || end < start) return null;
+  if (start === -1) return null;
 
-  const candidate = text.slice(start, end + 1);
+  // Never closed: the reply was cut off mid-object. Unreadable, not salvage.
+  const end = endOfObject(text, start);
+  if (end === -1) return null;
+
+  const candidate = text.slice(start, end);
+  const rest = text.slice(end);
+
+  // Any structure after a complete object — a repetition, a second answer, or
+  // stray closers — means this reply is not the one object it was asked for.
+  // Prose is still forgiven; braces are not.
+  if (/[{}]/.test(rest)) return null;
 
   try {
     return JSON.parse(candidate) as T;
@@ -69,6 +130,8 @@ export async function jsonCall<T>(options: {
   schema: JsonSchema;
   validate: (value: unknown) => T | null;
   params: InterviewParams;
+  /** The candidate's login — one interview is one circuit-breaker scope. */
+  scope?: string;
 }): Promise<{ data: T; call: CallRecord }> {
   const started = Date.now();
   let attempts = 0;
@@ -82,6 +145,7 @@ export async function jsonCall<T>(options: {
       topP: options.params.topP,
       maxTokens: options.params.maxTokens,
       provider,
+      scope: options.scope,
     });
     attempts += result.attempts;
 

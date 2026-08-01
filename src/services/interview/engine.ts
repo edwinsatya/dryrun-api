@@ -222,6 +222,7 @@ export async function generateQuestion(
     schema: QUESTION_SCHEMA,
     validate: validateQuestion,
     params,
+    scope: profile.identity.login,
   });
 
   // The planner owns the topic label; the model only writes the question.
@@ -245,6 +246,7 @@ export async function scoreAnswer(
     schema: ASSESSMENT_SCHEMA,
     validate: validateAssessment,
     params,
+    scope: profile.identity.login,
   });
 }
 
@@ -276,6 +278,7 @@ export async function continueExchange(
     schema: FOLLOW_UP_SCHEMA,
     validate: validateFollowUp,
     params,
+    scope: profile.identity.login,
   });
 }
 
@@ -293,5 +296,6 @@ export async function generateStudyPlan(
     schema: STUDY_PLAN_SCHEMA,
     validate: validateStudyPlan,
     params,
+    scope: profile.identity.login,
   });
 }

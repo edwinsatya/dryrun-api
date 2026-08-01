@@ -59,6 +59,25 @@ function toSdkSchema(schema: JsonSchema): Schema {
   return out;
 }
 
+/**
+ * Models known to reject `thinkingConfig`, learned at the first 400.
+ *
+ * Process-lifetime memo, deliberately not a hardcoded list: which models
+ * accept the knob is a property of the API on the day, and a stale allowlist
+ * would either re-introduce the wasted round-trip or suppress the control on a
+ * model that now supports it.
+ *
+ * Left in memory when the cache, breaker, rate limiter and vision cap all
+ * moved to Redis, and the reason is worth stating because "some state moved
+ * and some did not" otherwise looks like an oversight. This one is a
+ * performance memo, not a guard: its worst case under serverless is one wasted
+ * 400 per container, and it degrades toward *more correctness*, never less.
+ * Moving it would put a network round-trip in front of every Gemini call to
+ * save at most one round-trip per container — a straight loss. The same
+ * applies to the cached SDK client below.
+ */
+const rejectsThinkingControl = new Set<string>();
+
 /** One client per key; constructing it per request is pure overhead. */
 let cached: { key: string; client: GoogleGenAI } | null = null;
 
@@ -128,6 +147,7 @@ export async function callGemini(request: ChatRequest): Promise<AdapterResult> {
         ...(supportsSystemInstruction
           ? { systemInstruction: request.system }
           : {}),
+        ...(request.signal ? { abortSignal: request.signal } : {}),
         temperature: request.temperature ?? DEFAULT_PARAMS.temperature,
         topP: request.topP ?? DEFAULT_PARAMS.topP,
         maxOutputTokens: request.maxTokens ?? DEFAULT_PARAMS.maxTokens,
@@ -148,18 +168,31 @@ export async function callGemini(request: ChatRequest): Promise<AdapterResult> {
 
   let text: string | undefined;
   let usage: TokenUsage | null = null;
+  let finishReason: FinishReason | undefined;
   try {
     let response;
-    try {
-      response = await send(true);
-    } catch (error) {
-      // thinkingBudget is not accepted by every model in this family — some
-      // reject it outright with 400. Losing the whole call over a tuning knob
-      // would be the wrong trade, so drop it and try once more.
-      if (error instanceof ApiError && error.status === 400) {
-        response = await send(false);
-      } else {
-        throw error;
+    if (rejectsThinkingControl.has(model)) {
+      response = await send(false);
+    } else {
+      try {
+        response = await send(true);
+      } catch (error) {
+        /*
+         * thinkingBudget is not accepted by every model in this family — the
+         * Gemma models reject it outright with 400. Losing the whole call over
+         * a tuning knob would be the wrong trade, so drop it and try once more
+         * — but remember, because paying a guaranteed 400 on every subsequent
+         * call doubles the request count for that model and buys nothing.
+         */
+        if (error instanceof ApiError && error.status === 400) {
+          rejectsThinkingControl.add(model);
+          console.warn(
+            `[llm] ${model} rejects thinkingConfig; retrying without it and skipping it from now on`,
+          );
+          response = await send(false);
+        } else {
+          throw error;
+        }
       }
     }
 
@@ -173,8 +206,8 @@ export async function callGemini(request: ChatRequest): Promise<AdapterResult> {
      * provider and never reaches the healthy fallback. Raise it instead, and
      * let the retry-and-fallover ladder do its job.
      */
-    const finish = response.candidates?.[0]?.finishReason;
-    if (finish === FinishReason.MAX_TOKENS) {
+    finishReason = response.candidates?.[0]?.finishReason;
+    if (finishReason === FinishReason.MAX_TOKENS) {
       throw new LlmError(
         "EMPTY_RESPONSE",
         `Gemini hit the output limit before finishing (model ${model}). The reply is truncated.`,
@@ -213,5 +246,13 @@ export async function callGemini(request: ChatRequest): Promise<AdapterResult> {
     });
   }
 
-  return { text: trimmed, usage };
+  // A reply that stopped for any reason other than "the model was done" is
+  // still returned — it may well be usable — but it does not pass unremarked.
+  if (finishReason && finishReason !== FinishReason.STOP) {
+    console.warn(
+      `[llm] ${model} finished with ${finishReason}, not STOP — the reply may be incomplete`,
+    );
+  }
+
+  return { text: trimmed, usage, finishReason: finishReason ?? null };
 }

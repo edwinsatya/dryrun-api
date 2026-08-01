@@ -62,6 +62,7 @@ export async function callGroq(request: ChatRequest): Promise<AdapterResult> {
   const send = (jsonMode: boolean) =>
     fetch(ENDPOINT, {
       method: "POST",
+      signal: request.signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
@@ -103,7 +104,15 @@ export async function callGroq(request: ChatRequest): Promise<AdapterResult> {
         response = await send(false);
       }
     }
-  } catch {
+  } catch (error) {
+    // An abandoned attempt is a timeout, not an unreachable host. Reporting it
+    // as the latter sends the reader looking for a network fault that is not
+    // there.
+    if (request.signal?.aborted) {
+      throw new LlmError("TIMEOUT", "Groq did not answer in time.", {
+        retryable: true,
+      });
+    }
     throw new LlmError("UPSTREAM_ERROR", "Could not reach Groq.", {
       retryable: true,
     });
@@ -147,5 +156,15 @@ export async function callGroq(request: ChatRequest): Promise<AdapterResult> {
     );
   }
 
-  return { text, usage: usageOf(data.usage) };
+  if (choice?.finish_reason && choice.finish_reason !== "stop") {
+    console.warn(
+      `[llm] ${request.model ?? modelFor("groq")} finished with ${choice.finish_reason}, not stop — the reply may be incomplete`,
+    );
+  }
+
+  return {
+    text,
+    usage: usageOf(data.usage),
+    finishReason: choice?.finish_reason ?? null,
+  };
 }

@@ -1,0 +1,15 @@
+{
+  // Typechecking only — never used to emit.
+  //
+  // The build config keeps rootDir at ./src so dist mirrors src exactly, which
+  // means api/index.ts, the Vercel entry point, falls outside it. Vercel
+  // compiles that file itself, so without this config a broken import there
+  // would not surface until a deploy failed. This config exists so
+  // `npm run typecheck` covers the code that actually runs in production.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "api/**/*.ts"]
+}

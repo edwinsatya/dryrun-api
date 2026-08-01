@@ -12,6 +12,7 @@ import { callGroq } from "./groq.js";
 import {
   LlmError,
   modelFor,
+  PROVIDER_ORDER,
   type AdapterResult,
   type ChatRequest,
   type Provider,
@@ -87,7 +88,14 @@ async function probe(provider: Provider): Promise<ProviderHealth> {
   }
 }
 
-/** Both providers, in parallel. One cheap call each. */
+/**
+ * Both providers, in parallel. One cheap call each.
+ *
+ * Returned in PROVIDER_ORDER, because the caller reads `providers[0]` as the
+ * primary. Hardcoding the pair here once meant the chain could be reordered
+ * while /health carried on calling the old primary by that name — a health
+ * check that reports the wrong provider as primary is worse than none.
+ */
 export async function checkProviders(): Promise<ProviderHealth[]> {
-  return Promise.all([probe("gemini"), probe("groq")]);
+  return Promise.all(PROVIDER_ORDER.map(probe));
 }

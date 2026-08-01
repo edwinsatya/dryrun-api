@@ -14,14 +14,18 @@
 import type { Request, Response } from "express";
 
 import { checkProviders } from "../services/llm/health.js";
-import { cacheSize } from "../utils/cache.js";
+import { inFlightCount } from "../utils/cache.js";
+import { redisHealth } from "../utils/redis.js";
 import type { HealthResponse } from "../types/api.js";
 
 export async function getHealth(
   _request: Request,
   response: Response,
 ): Promise<void> {
-  const providers = await checkProviders();
+  const [providers, store] = await Promise.all([
+    checkProviders(),
+    redisHealth(),
+  ]);
   const primary = providers[0];
 
   const body: HealthResponse = {
@@ -29,8 +33,9 @@ export async function getHealth(
     // survivable, but it is not health.
     ok: primary?.ok ?? false,
     degraded: !primary?.ok && providers.some((p) => p.ok),
-    uptimeSeconds: Math.round(process.uptime()),
-    cachedProfiles: cacheSize(),
+    containerAgeSeconds: Math.round(process.uptime()),
+    store,
+    inFlight: inFlightCount(),
     providers,
   };
 

@@ -37,7 +37,10 @@ export const DEFAULT_INTERVIEW_PARAMS: InterviewParams = {
   difficulty: "mid",
   strictness: "balanced",
   language: "en",
-  provider: "gemini",
+  // Groq leads the chain — see PROVIDER_ORDER. This default is what actually
+  // decides it for an interview: jsonCall sends the provider explicitly, so a
+  // default of "gemini" here would put Gemini first whatever the chain says.
+  provider: "groq",
 };
 
 // ---------------------------------------------------------------------------

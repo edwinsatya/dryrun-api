@@ -30,12 +30,7 @@ import {
   type RepoDeepRead,
 } from "./analyze.js";
 import type { ProfileResponse } from "../../types/candidate.js";
-import {
-  dropCached,
-  getCached,
-  ONE_HOUR_MS,
-  setCached,
-} from "../../utils/cache.js";
+import { dedupe, getCached, ONE_HOUR_MS, setCached } from "../../utils/cache.js";
 
 /** README characters kept as prompt material. */
 const README_LIMIT = 500;
@@ -180,28 +175,34 @@ function cacheKey(login: string): string {
 /**
  * The cached entry point. Every caller goes through this — the profile route,
  * and every interview route by way of loadSession().
+ *
+ * Both cache layers are here, in this order:
+ *
+ *   dedupe()   one fetch per key while it is in flight in this process
+ *   Redis      the resolved profile, shared across invocations
+ *   GitHub     only when neither of the above answered
+ *
+ * The Redis read sits inside dedupe rather than before it so that concurrent
+ * callers share the round-trip to Redis too, not only the fetch to GitHub.
+ *
+ * A store that is down is indistinguishable from a miss by design, so this
+ * degrades to exactly the behaviour it had before any cache existed: it calls
+ * GitHub. redis.ts logs the degradation once, so the cost is visible.
  */
 export function fetchProfile(login: string): Promise<ProfileResponse> {
   const key = cacheKey(login);
 
-  const hit = getCached<Promise<ProfileResponse>>(key);
-  if (hit) return hit;
+  return dedupe(key, async () => {
+    const hit = await getCached<ProfileResponse>(key);
+    if (hit) return hit;
 
-  const pending = loadProfile(login);
-  setCached(key, pending, ONE_HOUR_MS);
+    const result = await loadProfile(login);
 
-  pending.then(
-    (result) => {
-      // Shorten the hour to seconds if the profile did not build. Nothing here
-      // is worth remembering: not a 404 on a name that may be a typo, and
-      // certainly not a rate limit that expires on GitHub's clock, not ours.
-      if (!result.ok) setCached(key, pending, FAILURE_TTL_MS);
-    },
-    () => {
-      // The promise itself rejected — never cache a thrown error.
-      dropCached(key);
-    },
-  );
+    // Shorten the hour to seconds if the profile did not build. Nothing here
+    // is worth remembering: not a 404 on a name that may be a typo, and
+    // certainly not a rate limit that expires on GitHub's clock, not ours.
+    await setCached(key, result, result.ok ? ONE_HOUR_MS : FAILURE_TTL_MS);
 
-  return pending;
+    return result;
+  });
 }

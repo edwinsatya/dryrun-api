@@ -75,9 +75,30 @@ export interface SummaryRequest extends InterviewRequestBase {
 export interface HealthResponse {
   ok: boolean;
   degraded: boolean;
-  /** seconds since the process started, for the keepalive cron */
-  uptimeSeconds: number;
-  /** cached profiles currently live */
-  cachedProfiles: number;
+  /**
+   * Seconds since *this container* started — not since the service deployed.
+   *
+   * Named for what it measures. It was `uptimeSeconds`, which under serverless
+   * reads as a service restarting every few minutes: each cold start resets
+   * it, and the number says nothing about availability. Kept because it still
+   * answers one useful question — whether the request that is reading it paid
+   * a cold start.
+   */
+  containerAgeSeconds: number;
+  /**
+   * The external store the cache, breaker, limiter and vision cap all sit on.
+   *
+   * `cachedProfiles` used to live here, counting a Map. Counting keys in Redis
+   * would mean a scan on every health check to answer a question nobody asks;
+   * whether the store is reachable is the thing that actually matters, since
+   * every guard in the system degrades quietly when it is not.
+   */
+  store: {
+    configured: boolean;
+    ok: boolean;
+    ms: number;
+  };
+  /** GitHub fetches in flight in this container — the L1 dedupe layer */
+  inFlight: number;
   providers: ProviderHealth[];
 }
